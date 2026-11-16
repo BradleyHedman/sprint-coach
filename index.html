@@ -191,13 +191,39 @@ hr{border:none;border-top:1px solid var(--line);margin:4px 0}
 const DATA_VERSION=2;
 
 /* ---------- events ---------- */
-const EVENTS=["60m","100m","200m","300m","400m","60mH","100mH","110mH","400mH"];
-const WIND_EVENTS=new Set(["100m","200m","100mH","110mH"]);
-const LONG_EVENTS=new Set(["300m","400m","400mH"]);
+const EVENTS=["60m","100m","200m","300m","400m","60mH","70mH","75mH","80mH","100mH","110mH","300mH","400mH"];
+const WIND_EVENTS=new Set(["100m","200m","70mH","75mH","80mH","100mH","110mH"]);
+const LONG_EVENTS=new Set(["300m","400m","300mH","400mH"]);
 const MAIN_EVENTS=[{k:"100m",n:"100m"},{k:"200m",n:"200m"},{k:"400m",n:"400m"},{k:"SH",n:"Sprint hurdles"},{k:"400mH",n:"400m hurdles"}];
-function mainName(p){if(p.event==="SH")return p.sex==="F"?"100mH":"110mH";return p.event;}
-function fam(p){return({"100m":"100","200m":"200","400m":"400","SH":"SH","400mH":"400H"})[p.event]||"400";}
-function isHurdler(p){return p.event==="SH"||p.event==="400mH";}
+const SEC_EVENTS=[{k:"60m",n:"60m"},...MAIN_EVENTS];
+const SH_RACES=["70mH","75mH","80mH","100mH","110mH"],LH_RACES=["300mH","400mH"];
+function hurdleRace(p,ev){if(ev==="SH")return p.hRace||(p.sex==="F"?"100mH":"110mH");if(ev==="400mH")return p.hRaceLong||"400mH";return null;}
+function evName(p,k){return hurdleRace(p,k)||k;}
+function mainName(p){return evName(p,p.event);}
+function famOf(k){return({"60m":"100","100m":"100","200m":"200","400m":"400","SH":"SH","400mH":"400H"})[k]||"400";}
+function fam(p){return famOf(p.event);}
+function allEvents(p){return [p.event,...(p.secondaries||[])].filter(Boolean);}
+function hurdleEv(p){return allEvents(p).find(e=>e==="SH"||e==="400mH")||null;}
+function isHurdler(p){return !!hurdleEv(p);}
+function eventLabel(p){const sec=(p.secondaries||[]).map(k=>evName(p,k));return mainName(p)+(sec.length?" (+"+sec.join(", ")+")":"");}
+
+/* ---------- age groups (UK Athletics, from 1 April 2026) ---------- */
+// U10–U18: two-year bands by age on 31 August in the competition year (1 Oct–30 Sep).
+// U20: 18+ on 31 August and under 20 on 31 December. Senior: 20+ on 31 December.
+// Masters: 35+ on the day of competition, in five-year bands.
+function ageOn(dob,date){const b=parseISO(dob);if(!b)return null;let a=date.getFullYear()-b.getFullYear();if(date.getMonth()<b.getMonth()||(date.getMonth()===b.getMonth()&&date.getDate()<b.getDate()))a--;return a;}
+function ageGroup(p,date){
+  date=date||new Date();if(!p.dob)return null;const age=ageOn(p.dob,date);if(age==null||age<0)return null;
+  if(age>=35){const band=Math.floor(age/5)*5;return{code:(p.sex==="F"?"W":"M")+band,age,masters:true};}
+  const dec=ageOn(p.dob,new Date(date.getFullYear(),11,31));
+  const augComp=ageOn(p.dob,new Date(date.getMonth()>=9?date.getFullYear()+1:date.getFullYear(),7,31));
+  const augCal=ageOn(p.dob,new Date(date.getFullYear(),7,31));
+  if(dec>=20)return{code:dec<=22?"U23":"Senior",age,senior:true};
+  if(augComp>=18||augCal>=18)return{code:"U20",age,u20:true};
+  for(const [min,c] of [[16,"U18"],[14,"U16"],[12,"U14"],[10,"U12"],[0,"U10"]])if(augComp>=min)return{code:c,age,youth:true,young:min<=14};
+  return null;
+}
+function agLabel(p){const a=ageGroup(p);return a?a.code:"";}
 
 /* ---------- session types ---------- */
 const TYPES={
@@ -244,12 +270,12 @@ function lsGet(k){try{const r=localStorage.getItem(k);return r?JSON.parse(r):nul
 function lsSet(k,v){try{localStorage.setItem(k,JSON.stringify(v));return true;}catch(e){return false;}}
 let INDEX=lsGet(K_INDEX)||{active:null,profiles:[]};
 let S=null; // active profile data
-let ui={tab:"week",weekOffset:0,sheet:null,filter:"all",prefill:null,importRows:null,chartDist:null,setup:null};
+let ui={tab:"week",weekOffset:0,sheet:null,filter:"all",prefill:null,importRows:null,importText:"",importYear:new Date().getFullYear(),chartDist:null,setup:null};
 
 function newId(){return Date.now().toString(36)+Math.random().toString(36).slice(2,6);}
 function blankProfile(){
   return{version:DATA_VERSION,id:newId(),created:iso(new Date()),
-    profile:{name:"",sex:"M",ageGroup:"senior",hurdleH:"",event:"",mode:"app",
+    profile:{name:"",sex:"M",dob:"",event:"",secondaries:[],priorities:[],hRace:"",hRaceLong:"",hSpec:{h:"",first:"",sp:""},mode:"app",
       goal:{type:"continual",champ:"",indoor:""},
       blockStart:iso(mondayOf(new Date())),seasonStart:defaultSeasonStart(),
       days:["both","track","gym","track","both","track","rest"],
@@ -271,6 +297,10 @@ function fillDefaults(d){const b=blankProfile();const out=Object.assign(b,d);out
   out.profile.goal=Object.assign({type:"continual",champ:"",indoor:""},(d.profile||{}).goal||{});
   out.profile.ramadan=Object.assign({on:false,start:"",end:"",timing:"iftar"},(d.profile||{}).ramadan||{});
   if(!Array.isArray(out.profile.days)||out.profile.days.length!==7)out.profile.days=b.profile.days;
+  ["secondaries","priorities"].forEach(k=>{if(!Array.isArray(out.profile[k]))out.profile[k]=[];});
+  out.profile.hSpec=Object.assign({h:"",first:"",sp:""},(d.profile||{}).hSpec||{});
+  if(out.profile.ageGroup==="custom"&&out.profile.hurdleH&&!out.profile.hSpec.h)out.profile.hSpec.h=out.profile.hurdleH;
+  delete out.profile.ageGroup;delete out.profile.hurdleH;
   ["records","comps","templates","niggles"].forEach(k=>{if(!Array.isArray(out[k]))out[k]=[];});
   ["logs","coach","checkins"].forEach(k=>{if(!out[k]||typeof out[k]!=="object")out[k]={};});
   out.version=DATA_VERSION;return out;}
@@ -302,20 +332,53 @@ function parseTime(str){
   const n=Number(str);return isFinite(n)&&n>0?n:null;
 }
 function fmtTime(t){if(t==null||!isFinite(t))return"—";if(t>=60){const m=Math.floor(t/60);const s=(t-m*60).toFixed(2).padStart(5,"0");return m+":"+s;}return t.toFixed(2);}
+function fmtMark(r){if(r.timing==="HT"&&Math.abs(r.secs*10-Math.round(r.secs*10))<1e-6){const t=r.secs;if(t>=60){const m=Math.floor(t/60);return m+":"+(t-m*60).toFixed(1).padStart(4,"0")+"h";}return t.toFixed(1)+"h";}return fmtTime(r.secs)+(r.timing==="HT"?"h":"");}
 function fatEq(r){if(r.timing!=="HT")return r.secs;return r.secs+(LONG_EVENTS.has(r.event)?0.14:0.24);}
 function windLegal(r){return !WIND_EVENTS.has(r.event)||r.wind===""||r.wind==null||Number(r.wind)<=2.0;}
+// Like Power of 10: electronic and hand-timed bests are kept separately.
 function bests(ev){
   const list=S.records.filter(r=>r.event===ev&&windLegal(r));
-  const best=a=>a.reduce((b,r)=>!b||fatEq(r)<fatEq(b)?r:b,null);
-  return{pb:best(list),sb:best(list.filter(r=>r.date>=S.profile.seasonStart))};
+  const best=a=>a.reduce((b,r)=>!b||r.secs<b.secs?r:b,null);
+  const fat=list.filter(r=>r.timing!=="HT"),hand=list.filter(r=>r.timing==="HT");
+  const inSeason=a=>a.filter(r=>r.date>=S.profile.seasonStart);
+  const pbF=best(fat),pbH=best(hand),sbF=best(inSeason(fat)),sbH=best(inSeason(hand));
+  return{pb:pbF||pbH,sb:sbF||sbH,pbHand:pbF?pbH:null,sbHand:sbF?sbH:null};
 }
-function pbT(ev){const b=bests(ev).pb;return b?fatEq(b):null;}
+// for coaching comparisons, use the fastest mark once hand times are converted to electronic
+// Wind-assisted marks: rough tailwind benefit per m/s (published models), used cautiously.
+const WIND_K={"100m":0.055,"200m":0.05,"70mH":0.05,"75mH":0.05,"80mH":0.05,"100mH":0.055,"110mH":0.055};
+function windAdj(r){if(windLegal(r))return fatEq(r);const w=Number(r.wind);if(!isFinite(w)||w>4)return null;return fatEq(r)+(WIND_K[r.event]||0.05)*w;}
+// Legal marks first; a wind-adjusted mark only when there's no legal one or it's clearly faster.
+function pbInfo(ev){
+  const all=S.records.filter(r=>r.event===ev);if(!all.length)return null;let best=null;
+  for(const r of all.filter(windLegal)){const t=fatEq(r);if(!best||t<best.t)best={t,r,adjusted:false};}
+  for(const r of all){if(windLegal(r))continue;const t=windAdj(r);if(t==null)continue;
+    if(!best||(best.adjusted?t<best.t:t<best.t-0.03))best={t,r,adjusted:true};}
+  return best;
+}
+function pbT(ev){const i=pbInfo(ev);return i?i.t:null;}
+
+/* ---------- athlete level (senior benchmarks, electronic times) ---------- */
+const LEVELS={M:{"60m":[6.75,6.95,7.25],"100m":[10.4,10.8,11.4],"200m":[20.9,21.7,22.9],"400m":[46.5,48.5,51],"110mH":[14,14.8,16],"400mH":[51,54,58]},
+  F:{"60m":[7.4,7.65,8.0],"100m":[11.5,12,12.7],"200m":[23.3,24.4,25.9],"400m":[52.5,55.5,59],"100mH":[13.3,14,15.2],"400mH":[58,62,67]}};
+function athleteLevel(){
+  const p=S.profile;const ag=ageGroup(p);if(ag&&ag.youth)return{level:"youth",ev:mainName(p)};
+  const ev=mainName(p);const tbl=LEVELS[p.sex==="F"?"F":"M"][ev];const info=pbInfo(ev);if(!tbl||!info)return null;
+  let t=info.t,graded=false;if(ag&&ag.masters&&ag.age>30){t=t*(1-0.007*(ag.age-30));graded=true;} // rough age-grading
+  const names=["elite","national","club","developing"];let i=tbl.findIndex(x=>t<x);if(i<0)i=3;
+  return{level:names[i],t:info.t,graded,ev};
+}
 
 /* ---------- hurdle specs ---------- */
-function hurdleSpec(p,which){
-  const sh=which?which!=="400mH":p.event==="SH";const F=p.sex==="F";
-  if(sh){const s=F?{h:0.838,first:13.0,sp:8.5}:(p.ageGroup==="u20"?{h:0.991,first:13.72,sp:9.14}:{h:1.067,first:13.72,sp:9.14});if(p.ageGroup==="custom"&&p.hurdleH)s.h=Number(p.hurdleH);return s;}
-  const s={h:F?0.762:0.914,first:45,sp:35};if(p.ageGroup==="custom"&&p.hurdleH)s.h=Number(p.hurdleH);return s;
+function hurdleSpec(p){
+  const ev=hurdleEv(p);if(!ev)return null;const h=p.hSpec||{};
+  if(h.h)return{h:+h.h,first:h.first?+h.first:null,sp:h.sp?+h.sp:null,custom:true};
+  const race=hurdleRace(p,ev);const ag=ageGroup(p);const F=p.sex==="F";const senior=!ag||ag.senior,u20=!!(ag&&ag.u20);
+  if(race==="110mH"&&!F&&senior)return{h:1.067,first:13.72,sp:9.14};
+  if(race==="110mH"&&!F&&u20)return{h:0.991,first:13.72,sp:9.14};
+  if(race==="100mH"&&F&&(senior||u20))return{h:0.838,first:13.0,sp:8.5};
+  if(race==="400mH"&&(senior||u20))return{h:F?0.762:0.914,first:45,sp:35};
+  return null; // youth, masters and other races: the athlete enters their own specs
 }
 
 /* ---------- season structure ---------- */
@@ -356,8 +419,9 @@ function compsOn(dISO){return S.comps.filter(c=>c.date===dISO);}
 
 /* ---------- coaching analysis ---------- */
 function analyse(){
-  const p=S.profile;const F=p.sex==="F";
+  const p=S.profile;const F=p.sex==="F";const fams=new Set(allEvents(p).map(famOf));
   const t={};EVENTS.forEach(e=>t[e]=pbT(e));
+  const adjusted=EVENTS.map(e=>({e,i:pbInfo(e)})).filter(x=>x.i&&x.i.adjusted).map(x=>`${x.e}: ${fmtMark(x.i.r)} (+${Number(x.i.r.wind).toFixed(1)}) ≈ ${fmtTime(x.i.t)} adjusted`);
   const w={acc:1,maxv:1,se:1,spe:1,lac:1,hStart:1,hRhythm:1,hSE:1,hStride:1};
   const findings=[],missing=[];
   const add=(c,title,ratio,text)=>findings.push({c,title,ratio,text});
@@ -365,18 +429,19 @@ function analyse(){
     if(r>1.56){w.maxv+=.8;w.se+=.2;add("var(--t-maxv)","Your 100m fades compared with your 60m",`100m ÷ 60m = ${r.toFixed(3)}`,"Your start is ahead of your top-end speed. More flying sprints and speed maintenance will help you hold speed to the line.");}
     else if(r<1.525){w.acc+=.8;w.hStart+=.3;add("var(--t-acc)","Your first 60m is the weaker part",`100m ÷ 60m = ${r.toFixed(3)}`,"You finish strongly but lose ground early. Extra block starts and acceleration work to 30–40m should pay off.");}
     else add("var(--good)","Start and top speed are balanced",`100m ÷ 60m = ${r.toFixed(3)}`,"Your 60m and 100m match well, so no extra weighting either way.");
-  }else if(fam(p)!=="400"&&fam(p)!=="400H")missing.push("60m and 100m");
+  }else if(fams.has("100")||fams.has("SH")||fams.has("200"))missing.push("60m and 100m");
   if(t["100m"]&&t["200m"]){const d=t["200m"]-2*t["100m"];
     if(d>0.4){w.se+=.8;add("var(--t-se)","Your 200m doesn't match your 100m speed",`200m − 2 × 100m = +${d.toFixed(2)}s`,"You have the speed but lose it over the bend and home straight. Speed endurance (80–150m at 95%) gets more weight.");}
     else if(d<-0.1){w.maxv+=.5;w.acc+=.3;add("var(--t-maxv)","Your 200m is ahead of your 100m",`200m − 2 × 100m = ${d.toFixed(2)}s`,"You carry speed well, so raw speed is the limiter. Max velocity work gets more weight.");}
     else add("var(--good)","100m and 200m are well matched",`200m − 2 × 100m = ${d>=0?"+":""}${d.toFixed(2)}s`,"Your speed carries into the 200m as expected.");
-  }else missing.push("100m and 200m");
+  }else if(!(fams.size===1&&fams.has("400H")))missing.push("100m and 200m");
   if(t["200m"]&&t["400m"]){const d=t["400m"]-2*t["200m"];
     if(d>4.5){w.spe+=.8;w.lac+=.5;w.hSE+=.3;add("var(--t-spe)","Your 400m isn't using your 200m speed",`400m − 2 × 200m = +${d.toFixed(2)}s`,"There's a big speed reserve left on the table. Special endurance (250–350m) and lactic work get more weight.");}
     else if(d<3.2){w.maxv+=.5;w.se+=.4;add("var(--t-maxv)","Your 400m is strong for your 200m",`400m − 2 × 200m = +${d.toFixed(2)}s`,"Your endurance is good. Raising your top speed and speed endurance is the quickest route to a faster 400m.");}
     else add("var(--good)","200m and 400m are balanced",`400m − 2 × 200m = +${d.toFixed(2)}s`,"Your 400m is about where your 200m speed suggests.");
-  }else if(fam(p)==="400"||fam(p)==="400H"||fam(p)==="200")missing.push("200m and 400m");
-  if(fam(p)==="SH"){const hEv=F?"100mH":"110mH";
+  }else if(fams.has("400")||fams.has("400H")||fams.has("200"))missing.push("200m and 400m");
+  const hEv=fams.has("SH")?hurdleRace(p,"SH"):null;
+  if(hEv&&(hEv==="100mH"||hEv==="110mH")){
     if(t[hEv]&&t["100m"]){const d=t[hEv]-t["100m"];const hi=F?1.9:3.3,lo=F?1.3:2.6;
       if(d>hi){w.hRhythm+=.8;w.hStart+=.4;add("var(--t-hurdle)","Your hurdles time is well off your flat speed",`${hEv} − 100m = +${d.toFixed(2)}s`,"You're losing time over the barriers, not between them. Technique, rhythm and starts to the first hurdles get more weight.");}
       else if(d<lo){w.maxv+=.6;w.acc+=.4;add("var(--t-maxv)","Your hurdling is efficient. Flat speed is the limiter",`${hEv} − 100m = +${d.toFixed(2)}s`,"You convert your speed well over the barriers. Getting faster on the flat is the quickest route to a faster hurdles time.");}
@@ -384,21 +449,53 @@ function analyse(){
     }else missing.push(hEv+" and 100m");
     if(t["60mH"]&&t["60m"]){const d=t["60mH"]-t["60m"];if(d>(F?1.15:1.3)){w.hStart+=.6;add("var(--t-hurdle)","Your 60mH loses time early",`60mH − 60m = +${d.toFixed(2)}s`,"Starts and the run-in to hurdles 1–2 get more weight.");}}
   }
-  if(fam(p)==="400H"){
+  if(fams.has("400H")&&hurdleRace(p,"400mH")==="400mH"){
     if(t["400mH"]&&t["400m"]){const d=t["400mH"]-t["400m"];
       if(d>(F?4.5:4.0)){w.hStride+=.8;w.hSE+=.5;add("var(--t-hurdle)","Your 400mH is well off your flat 400m",`400mH − 400m = +${d.toFixed(2)}s`,"Rhythm under fatigue is costing you: stride pattern work and hurdle speed endurance get more weight.");}
       else if(d<2.5){w.se+=.5;w.spe+=.4;add("var(--t-se)","Your hurdling is efficient. Flat 400m is the limiter",`400mH − 400m = +${d.toFixed(2)}s`,"Raising your flat 400m speed and endurance is the quickest route to a faster 400mH.");}
       else add("var(--good)","400mH and 400m are well matched",`400mH − 400m = +${d.toFixed(2)}s`,"Your hurdle differential is in a normal range.");
     }else missing.push("400mH and 400m");
   }
-  return{w,findings,missing,t};
+  return{w,findings,missing,t,adjusted};
 }
 let RANK_CACHE={};
+function phKeyOf(k){return k==="trans"?"gpp":k;}
 function rankedQuality(phKey){
   if(RANK_CACHE[phKey])return RANK_CACHE[phKey];
-  const base=EMPH[fam(S.profile)][phKey==="trans"?"gpp":phKey];const {w}=analyse();
-  const r=Object.keys(base).map(k=>({k,s:base[k]*(w[k]||1)})).filter(x=>x.s>0).sort((a,b)=>b.s-a.s);
+  const p=S.profile;const {w}=analyse();const pk=phKeyOf(phKey);const base={};
+  const addEmph=(f,m)=>{const e=EMPH[f][pk];for(const k in e)base[k]=(base[k]||0)+e[k]*m;};
+  addEmph(fam(p),1);(p.secondaries||[]).forEach(k=>addEmph(famOf(k),0.35));
+  (p.priorities||[]).forEach(k=>{base[k]=(base[k]||1)*1.6;});
+  const ag=ageGroup(p);
+  if(ag&&ag.youth){if(ag.young){base.lac=0;if(base.spe)base.spe*=0.5;}else if(base.lac)base.lac*=0.5;}
+  if(ag&&ag.masters&&base.lac)base.lac*=0.6;
+  const r=Object.keys(base).filter(k=>QUAL_OK(k)).map(k=>({k,s:base[k]*(w[k]||1)})).filter(x=>x.s>0).sort((a,b)=>b.s-a.s);
   return RANK_CACHE[phKey]=r;
+}
+function QUAL_OK(k){return !TYPES[k].hurdle||isHurdler(S.profile);}
+// Speed is never dropped: the dose depends on speed reserve, level, age and coach priorities.
+function speedDose(ph,raceWeek){
+  const p=S.profile;
+  if(ph.p==="trans")return{dose:"none",why:"Transition weeks are easy running only."};
+  if(ph.taper||raceWeek)return{dose:"sharpen",why:(ph.taper?"Taper":"Race week")+": short, fast speed work at low volume keeps you sharp."};
+  if((p.priorities||[]).some(k=>k==="acc"||k==="maxv"))return{dose:"develop",why:"Your coach has made speed a priority, so it gets a full session every week."};
+  const ag=ageGroup(p);
+  if(ag&&ag.youth)return{dose:"develop",why:`${ag.code}: speed develops fastest at this age, so it gets a full session every week.`};
+  const f=fam(p);
+  if(f==="100"||f==="SH")return{dose:"develop",why:"Speed is the heart of your event, so it gets a full session every week."};
+  let score=0;const reasons=[];
+  if(f==="400"||f==="400H"){const t2=pbT("200m"),t4=pbT("400m");
+    if(t2&&t4){const d=t4-2*t2;if(d>4.5){score--;reasons.push(`your 400m is ${d.toFixed(1)}s slower than twice your 200m, so speed endurance is where the time is`);}
+      else if(d<3.2){score++;reasons.push(`your 400m is strong for your speed (${d.toFixed(1)}s off twice your 200m), so more speed is the quickest gain`);}
+      else reasons.push(`your 400m is ${d.toFixed(1)}s off twice your 200m, a normal balance`);}
+    else{score++;reasons.push("add 200m and 400m PBs to fine-tune this");}
+  }else{const t1=pbT("100m"),t2=pbT("200m");
+    if(t1&&t2){const d=t2-2*t1;if(d>0.4){score--;reasons.push("your 200m fades from your 100m speed");}else{score++;reasons.push("speed is the limiter for your 200m");}}else score++;}
+  const lv=athleteLevel();
+  if(lv&&lv.level!=="youth"){if(lv.level==="elite"||lv.level==="national"){score--;reasons.push(`at ${lv.level} level there's less speed left to gain cheaply`);}else{score++;reasons.push(`at ${lv.level} level speed is still very trainable`);}}
+  const dose=score>0?"develop":"maintain";
+  const r=reasons.join("; ");
+  return{dose,why:(dose==="develop"?"Full speed session each week: ":"Short speed block each week, before your main session: ")+(r?r.charAt(0).toLowerCase()+r.slice(1):"based on your event")+"."};
 }
 
 /* ---------- weekly plan ---------- */
@@ -414,18 +511,31 @@ function baseWeek(monday){
   if((ph.deload||ph.taper)&&q>1)q-=1;
   if(raceIdx.length)q=Math.min(q,raceIdx.length>1?1:2);
   if(ramadanOn(dayISO(3))&&q>2)q=2;
+  const ag=ageGroup(p);if(ag&&((ag.masters&&ag.age>=45)||ag.young)&&q>2)q=2;
   const blocked=new Set();raceIdx.forEach(r=>{blocked.add(r);blocked.add(r-1);blocked.add(r+1);});
   const qDays=[];
   for(const i of track){if(qDays.length>=q)break;if(blocked.has(i))continue;if(qDays.some(j=>Math.abs(j-i)<2))continue;qDays.push(i);}
   const ranked=rankedQuality(ph.p).map(x=>x.k);
-  let pick=ranked.slice(0,qDays.length);
-  if(ranked.length>qDays.length&&qDays.length>0&&Math.abs(ph.abs)%2===1)pick[pick.length-1]=ranked[qDays.length];
+  const n=qDays.length;const abs=Math.abs(ph.abs);
+  const dose=speedDose(ph,raceIdx.length>0);
+  const guaranteed=[];
+  if(dose.dose==="develop"||dose.dose==="sharpen"){const sp=(p.priorities||[]).find(k=>k==="acc"||k==="maxv")||ranked.find(k=>k==="acc"||k==="maxv")||(ph.p==="gpp"?"acc":"maxv");guaranteed.push(sp);}
+  (p.priorities||[]).forEach((k,i)=>{if(!QUAL_OK(k))return;if((track.length>=4||(abs+i)%2===0)&&!guaranteed.includes(k))guaranteed.push(k);});
+  const secs=(p.secondaries||[]);let secNote="",secType=null;
+  if(secs.length&&abs%2===1&&ph.p!=="trans"){const sk=secs[Math.floor(abs/2)%secs.length];const e=EMPH[famOf(sk)][phKeyOf(ph.p)];
+    const top=Object.keys(e).filter(k=>QUAL_OK(k)&&!(k==="acc"||k==="maxv")).sort((a,b)=>e[b]-e[a])[0];
+    if(top&&!guaranteed.includes(top)){guaranteed.push(top);secType=top;secNote=`${TYPES[top].name} for your ${evName(p,sk)}.`;}}
+  const speedOut=dose.dose==="maintain";
+  const pool=ranked.filter(k=>!guaranteed.includes(k)&&!(speedOut&&(k==="acc"||k==="maxv")));
+  let fill=pool.slice(0,Math.max(0,n-guaranteed.length));
+  if(pool.length>fill.length&&fill.length>0&&abs%2===1)fill[fill.length-1]=pool[fill.length];
+  let pick=[...guaranteed.slice(0,n),...fill];
   pick=[...new Set(pick)].sort((a,b)=>ORDER.indexOf(a)-ORDER.indexOf(b));
   const out=[];let qi=0,light=0;
   for(let i=0;i<7;i++){
     const d=p.days[i];const gym=d==="gym"||d==="both";let type="rest";const tags=[];
     if(raceIdx.includes(i)){type="race";}
-    else if(qDays.includes(i)){type=pick[qi++]||"tempo";}
+    else if(qDays.includes(i)){type=pick[qi++]||"tempo";if(speedOut&&qi===1)tags.push("primer");if(secType&&type===secType)tags.push("secondary");}
     else if(d==="track"||d==="both"){
       if(raceIdx.includes(i+1)){type="rec";tags.push("prerace");}
       else if(raceIdx.includes(i-1)){type="rec";tags.push("postrace");}
@@ -433,7 +543,7 @@ function baseWeek(monday){
     }
     out.push({type,gym:gym&&!raceIdx.includes(i),tags});
   }
-  return WEEK_CACHE[key]={days:out,ph};
+  return WEEK_CACHE[key]={days:out,ph,dose,secNote};
 }
 function usualCoachType(date){
   const counts={};
@@ -489,7 +599,7 @@ function dayPlan(date){
   // mini-taper: two days out from a race
   const in2=compsOn(iso(addDays(date,2)));
   if(in2.length&&plan.type!=="race"&&TYPES[plan.type].hi&&!["acc","maxv","hStart"].includes(plan.type)&&plan.src==="app"){
-    plan.why.push("Mini-taper: race in two days, so short sharp speed only.");plan.type=isHurdler(p)&&p.event==="SH"?"hStart":"acc";plan.notes.push("Half your usual reps.");
+    plan.why.push("Mini-taper: race in two days, so short sharp speed only.");plan.type=p.event==="SH"?"hStart":"acc";plan.notes.push("Half your usual reps.");
   }
   if(base.tags.includes("prerace")&&plan.type==="rec")plan.notes.push("Pre-race: 15 min warm-up, drills, 3 × 30m relaxed, 2 starts. Done in 30 min.");
   if(base.tags.includes("postrace")&&plan.type==="rec")plan.notes.push("Day after racing: flush out with easy jogging, mobility and stretching.");
@@ -506,6 +616,12 @@ function dayPlan(date){
     if(["spe","lac","hSE"].includes(plan.type)){plan.why.push(`Ramadan: ${TYPES[plan.type].name.toLowerCase()} swapped for shorter speed endurance.`);plan.type="se";}
     plan.notes.push(ramadanNote());
   }
+  if(base.tags.includes("primer")&&plan.type===base.type&&TYPES[plan.type].hi)plan.notes.unshift("Speed primer first: 3 × 30m flying (20m build-up), full recovery. Then the main session.");
+  if(base.tags.includes("secondary")&&plan.type===base.type)plan.notes.push(wb.secNote);
+  if(wb.dose.dose==="sharpen"&&["acc","maxv"].includes(plan.type))plan.notes.push("Sharpen: about half the usual reps, full recovery, every rep fast.");
+  const ag=ageGroup(p);
+  if(ag&&ag.youth&&TYPES[plan.type].hi)plan.notes.push("Quality over quantity: stop the session when times start to drop.");
+  if(ag&&ag.masters&&TYPES[plan.type].hi)plan.notes.push("Masters: an extra 10 minutes of warm-up before any fast running.");
   if(ph.deload)plan.notes.push("Deload week: do about 60% of the usual reps at the same speed.");
   if(ph.taper)plan.notes.push("Taper: volume down about 40%, keep the speed high. Full recovery between reps.");
   return plan;
@@ -522,7 +638,8 @@ function presc(type,ph){
   const t300=a["300m"]||(t400?t400*0.72:null);
   const aim=(x,unit)=>x?` · aim ≈ ${fmtTime(x)}${unit?" "+unit:""}`:"";
   const P=ph.p,gpp=P==="gpp",comp=P==="comp";
-  const hs=isHurdler(p)?hurdleSpec(p):null;const hDesc=hs?`Hurdles ${hs.h.toFixed(3)}m, ${hs.first}m to H1, ${hs.sp}m apart.`:"";
+  const hEv=hurdleEv(p);const hs=hEv?hurdleSpec(p):null;const long=hEv==="400mH";
+  const hDesc=hEv?(hs?`Hurdles ${hs.h.toFixed(3)}m${hs.first?`, ${hs.first}m to H1`:""}${hs.sp?`, ${hs.sp}m apart`:""}.`:"Set your hurdle height and spacing in Settings."):"";
   switch(type){
     case "acc":return gpp?"Warm-up + drills. 8 × 20m from 3-point, then 4 × 30m from blocks. Walk back + 2 min rest, 5 min between sets.":"Warm-up + drills. 6 × 30m from blocks, 3 min rest, then 3 × 40m, 4 min rest.";
     case "maxv":return (gpp?"4 × 20m flying (25m build-up), 4 min rest. Then 4 × 60m relaxed at 90%.":comp?"3 × 30m flying (20m build-up), 6 min rest. Quality over quantity.":"5 × 30m flying (20m build-up), 5–6 min rest.")+aim(t100?30*t100/115:null,"per 30m fly");
@@ -535,13 +652,13 @@ function presc(type,ph){
       return(gpp?"2 × 250m at 88%, 15 min rest":"2 × 250m at 93%, 15–20 min rest")+aim(t200?250*t200/200*1.04/(gpp?0.88:0.93):null,"per 250m");
     case "lac":return(gpp?"2 × (3 × 200m), 2 min rest, 12 min between sets":"2 × (2 × 200m), 90s rest, 15 min between sets")+aim(t400?t400/2*(gpp?1.06:1.0):null,"per 200m");
     case "hStart":
-      if(p.event==="400mH")return `Blocks to H2 × 4 (check your strides to H1), then to H3 × 2. 5–6 min rest. ${hDesc}`;
+      if(long)return `Blocks to H2 × 4 (check your strides to H1), then to H3 × 2. 5–6 min rest. ${hDesc}`;
       return (gpp?"Blocks to H1 × 6, to H2 × 4, 4 min rest.":"Blocks to H1 × 4, to H3 × 4, to H5 × 2. Full recovery, 5 min.")+" "+hDesc;
     case "hRhythm":
-      if(p.event==="400mH")return `4 × 5 hurdles from a rolling start at race rhythm, 8 min rest. ${hDesc}`;
+      if(long)return `4 × 5 hurdles from a rolling start at race rhythm, 8 min rest. ${hDesc}`;
       return (gpp?"6 × 5 hurdles, one notch lower and 0.5m closer than race spacing, walk back.":"6 × 6 hurdles at race spacing (or 0.3m closer), 3-step rhythm, 4 min rest.")+" "+hDesc;
     case "hSE":
-      if(p.event==="400mH"){const x=a["400mH"]?a["400mH"]*0.76/0.92:null;return `3 × 300m over 7 hurdles at 90%, 12–15 min rest${aim(x,"per 300m")}. ${hDesc}`;}
+      if(long){const x=a["400mH"]?a["400mH"]*0.76/0.92:null;return `3 × 300m over 7 hurdles at 90%, 12–15 min rest${aim(x,"per 300m")}. ${hDesc}`;}
       return `3 × 8 hurdles (or 10 at reduced spacing), 6–8 min rest. ${hDesc}`;
     case "hStride":return `4 × H4–H8 holding your race stride pattern, practise the change-down (e.g. 15 → 16), alternate lead legs, 8 min rest. ${hDesc}`;
     case "hDrills":return "Hurdle drills: walkovers, lead and trail leg, 3 × 5 hurdles at low height, plus 15 min hurdle mobility.";
@@ -554,6 +671,8 @@ function presc(type,ph){
 }
 function gymPresc(ph){
   if(ph.taper)return"Activation only: 2 × 3 jumps, light cleans, core. 20 min.";
+  const ag=ageGroup(S.profile);
+  if(ag&&ag.youth)return(ag.young?"Movement and bodyweight strength: squats, lunges, push-ups, hops and core, focusing on technique.":"Technique-led strength: learn the lifts with light loads (goblet squat, RDL, clean technique), plus jumps and core.")+(ph.deload?" Deload: about 60% of the sets.":"");
   const base=({gpp:"Strength: back squat 4 × 5 at ~80%, Romanian deadlift 3 × 6, split squat 3 × 8 each leg, core.",
     spp:"Power: power clean 5 × 3, squat 4 × 3 at ~85% moved fast, box jumps 4 × 5, core.",
     comp:"Maintain: power clean 3 × 2, squat 3 × 2 at ~85%, low-volume plyos, core.",
@@ -600,7 +719,41 @@ function parseDateTokens(toks,i){
     let y=+toks[i+2];if(y<100)y+=2000;const mo=MONTHS[toks[i+1].toLowerCase().slice(0,4).replace(/[^a-z]/g,"")];return{d:iso(new Date(y,mo,+a)),used:3};}
   return null;
 }
-function parsePo10(text){
+function parseShortDate(line,year){
+  // "12 Jul", "12 Jul 25", "12 Jul 2025", "12/07/25", "2025-07-12"
+  const t=line.trim();let m;
+  if((m=t.match(/^(\d{4})-(\d{2})-(\d{2})$/)))return t;
+  if((m=t.match(/^(\d{1,2})[\/.](\d{1,2})[\/.](\d{2,4})$/))){let y=+m[3];if(y<100)y+=2000;return iso(new Date(y,+m[2]-1,+m[1]));}
+  if((m=t.match(/^(\d{1,2})\s+([A-Za-z]{3,9})\.?(?:\s+(\d{2,4}))?$/))){const mo=MONTHS[m[2].toLowerCase().slice(0,4).replace(/[^a-z]/g,"")]??MONTHS[m[2].toLowerCase().slice(0,3)];if(mo===undefined)return null;
+    let y=m[3]?+m[3]:year;if(y<100)y+=2000;return iso(new Date(y,mo,+m[1]));}
+  return null;
+}
+const TIME_RE=/^(\d{1,2}:\d{2}\.\d{1,2}|\d{1,2}\.\d{1,2})([a-z]*)$/i;
+function isHandTime(t,flags){return /^\d+\.\d$/.test(t.split(":").pop())||/h/i.test(flags||"");}
+// Power of 10 profile pages copy as one field per line:
+// event / [Personal Best] / time / [w] / wind + position / venue / meeting / date (no year)
+function parsePo10Blocks(text,year){
+  const lines=text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+  const rows=[];let cur=null;
+  const finish=()=>{if(cur&&cur.secs&&cur.date){const venue=[cur.texts[0],cur.texts[1]].filter(Boolean).join(" · ").replace(/\.{3}$/,"…");
+    rows.push({event:cur.event,secs:cur.secs,timing:cur.hand?"HT":"FAT",wind:cur.wind,date:cur.date,venue:venue.slice(0,70),indoor:cur.indoor,assisted:cur.assisted,pick:true});}cur=null;};
+  for(const line of lines){
+    const toks=line.split(/\s+/);
+    const ev=toks.length===1?evToken(toks[0]):null;
+    if(ev){finish();cur={event:ev,secs:null,hand:false,wind:"",date:"",texts:[],indoor:false,assisted:false,gotNums:false};continue;}
+    if(!cur)continue;
+    if(!cur.secs){const tm=line.match(TIME_RE);if(tm){cur.secs=parseTime(tm[1]);cur.hand=isHandTime(tm[1],tm[2]);if(/i/i.test(tm[2]))cur.indoor=true;if(/w/i.test(tm[2]))cur.assisted=true;}continue;} // skips "Personal Best" etc.
+    if(/^[wi]$/i.test(line)){if(/w/i.test(line))cur.assisted=true;else cur.indoor=true;continue;}
+    if(!cur.gotNums&&toks.every(x=>/^[+-]?\d+(\.\d+)?$|^[hrsfq]\d+$|^\d+[hsfq]\d*$|^=$/i.test(x))){
+      cur.gotNums=true;if(/^[+-]?\d{1,2}\.\d$/.test(toks[0]))cur.wind=Number(toks[0]);continue;}
+    const d=parseShortDate(line,year);if(d){cur.date=d;continue;}
+    if(/^(personal best|season'?s best|pb|sb)$/i.test(line))continue;
+    cur.texts.push(line);
+  }
+  finish();return rows;
+}
+// one result per line: "200 22.45 +1.2 2 Lee Valley County Champs 12 Jul 25"
+function parsePo10Lines(text,year){
   const rows=[];let current=null;
   for(const raw of text.split(/\r?\n/)){
     const line=raw.trim();if(!line)continue;
@@ -608,19 +761,26 @@ function parsePo10(text){
     const ev0=evToken(toks[0]);
     if(ev0&&toks.length===1){current=ev0;continue;}
     let ev=ev0,i=ev0?1:0;if(!ev)ev=current;if(!ev)continue;
-    // time
-    const tm=toks[i]&&toks[i].match(/^(\d{1,2}:\d{2}\.\d{1,2}|\d{1,2}\.\d{1,2})([a-z]*)$/i);
+    const tm=toks[i]&&toks[i].match(TIME_RE);
     if(!tm)continue;const secs=parseTime(tm[1]);if(!secs)continue;
     const flags=tm[2]||"";i++;
-    const hand=/^\d+\.\d$/.test(tm[1].split(":").pop())||/h/i.test(flags);
     let wind="";
     if(toks[i]&&/^[+-]?\d{1,2}\.\d$/.test(toks[i])){wind=Number(toks[i]);i++;}
     let date="",venue=[];
-    for(let j=i;j<toks.length;j++){const d=parseDateTokens(toks,j);if(d){date=d.d;j+=d.used-1;continue;}
-      if(/^(\d+|[hrsfq]\d+|\d+[hsfq]\d*|ns|pb|sb|=)$/i.test(toks[j]))continue;venue.push(toks[j]);}
+    for(let j=i;j<toks.length;j++){
+      const d=parseDateTokens(toks,j);if(d){date=d.d;j+=d.used-1;continue;}
+      if(/^\d{1,2}$/.test(toks[j])&&toks[j+1]&&MONTHS[toks[j+1].toLowerCase().slice(0,3)]!==undefined&&!(toks[j+2]&&/^\d{2,4}$/.test(toks[j+2]))){date=iso(new Date(year,MONTHS[toks[j+1].toLowerCase().slice(0,3)],+toks[j]));j+=1;continue;}
+      if(/^(\d+|[hrsfq]\d+|\d+[hsfq]\d*|ns|pb|sb|=|w|i)$/i.test(toks[j]))continue;venue.push(toks[j]);}
     if(!date)continue;
-    rows.push({event:ev,secs,timing:hand?"HT":"FAT",wind,date,venue:venue.join(" ").slice(0,60),indoor:/i/i.test(flags),assisted:/w/i.test(flags),pick:true});
+    rows.push({event:ev,secs,timing:isHandTime(tm[1],flags)?"HT":"FAT",wind,date,venue:venue.join(" ").slice(0,70),indoor:/i/i.test(flags),assisted:/w/i.test(flags),pick:true});
   }
+  return rows;
+}
+function parsePo10(text,year){
+  year=+year||new Date().getFullYear();
+  let rows=parsePo10Blocks(text,year);
+  const alt=parsePo10Lines(text,year);
+  if(alt.length>rows.length)rows=alt;
   // mark duplicates of results already saved
   rows.forEach(r=>{r.dup=S.records.some(x=>x.event===r.event&&Math.abs(x.secs-r.secs)<0.005&&x.date===r.date);if(r.dup)r.pick=false;});
   return rows;
@@ -653,19 +813,20 @@ function render(){
 }
 function appBar(){
   const p=S.profile;const n=(p.name||"A").trim();
-  return `<div class="appbar"><button class="who ghost" id="who" aria-label="Switch athlete"><span class="avatar">${esc(n[0].toUpperCase())}</span><span>${esc(p.name||"Athlete")} · ${esc(mainName(p))}</span></button><span class="brand">Sprint Coach</span></div>`;
+  return `<div class="appbar"><button class="who ghost" id="who" aria-label="Switch athlete"><span class="avatar">${esc(n[0].toUpperCase())}</span><span>${esc(p.name||"Athlete")} · ${esc(mainName(p))}${agLabel(p)?" · "+esc(agLabel(p)):""}</span></button><span class="brand">Sprint Coach</span></div>`;
 }
 
 /* ---------- setup ---------- */
 function setupView(){
-  const d=ui.setup||(ui.setup={name:"",sex:"M",event:"",goal:"continual",champ:"",indoor:"",blockStart:iso(mondayOf(new Date())),days:["both","track","gym","track","both","track","rest"],first:!INDEX.profiles.length});
+  const d=ui.setup||(ui.setup=newSetup(!INDEX.profiles.length));const ag=d.dob?ageGroup({dob:d.dob,sex:d.sex}):null;
   return `<div class="stack-lg">
     <div class="stack"><div class="eyebrow">Sprint Coach</div><h1>${d.first?"Set up your season":"Add an athlete"}</h1>
     <p class="muted">Pick your event, goal and training days. The plan builds itself around them, and you can change any of it later in Settings.</p></div>
     <div class="panel stack">
       <div class="grid2"><label for="su-name">Name<input id="su-name" value="${esc(d.name)}" autocomplete="given-name"></label>
-      <div class="stack-sm"><span class="lbl">Sex (for hurdle heights)</span><div class="chips">${[["M","Male"],["F","Female"]].map(([k,n])=>`<button type="button" class="chip-btn sm" data-sx="${k}" aria-pressed="${d.sex===k}">${n}</button>`).join("")}</div></div></div>
-      <div class="stack-sm"><span class="lbl">Main event</span><div class="chips">${MAIN_EVENTS.map(e=>`<button type="button" class="chip-btn" data-ev="${e.k}" aria-pressed="${d.event===e.k}">${e.k==="SH"?(d.sex==="F"?"100mH":"110mH"):e.n}</button>`).join("")}</div></div>
+      <div class="stack-sm"><span class="lbl">Sex</span><div class="chips">${[["M","Male"],["F","Female"]].map(([k,n])=>`<button type="button" class="chip-btn sm" data-sx="${k}" aria-pressed="${d.sex===k}">${n}</button>`).join("")}</div></div>
+      ${dobField("su-dob",d.dob)}<p class="small muted" style="align-self:end">${ag?`Age group: <strong>${ag.code}</strong>. Used for hurdle specs, training load and your level.`:"Sets your UK Athletics age group, which adjusts hurdle specs and training load."}</p></div>
+      ${eventPickers(d,"su")}
     </div>
     <div class="panel stack"><h3>Your goal</h3>${goalPicker(d.goal,d.champ,d.indoor,"su")}</div>
     <div class="panel stack"><h3>Training days</h3>${daysEditor(d.days,"su")}
@@ -674,6 +835,15 @@ function setupView(){
     ${d.first?`<div class="panel stack"><h3>Moving from the first version?</h3><p class="small muted">Export a backup from the old Sprint Coach, then restore it here.</p><label for="su-import" class="small">Restore a backup<input id="su-import" type="file" accept="application/json,.json"></label></div>`:""}
   </div>`;
 }
+function eventPickers(o,pre){
+  const shName=o.sex==="F"?"100mH":"110mH";const lab=k=>k==="SH"?(o.hRace||shName):k==="400mH"?(o.hRaceLong||"400mH"):k;
+  const secs=o.secondaries||[];
+  return `<div class="stack-sm"><span class="lbl">Main event</span><div class="chips">${MAIN_EVENTS.map(e=>`<button type="button" class="chip-btn" data-${pre}-ev="${e.k}" aria-pressed="${o.event===e.k}">${lab(e.k)}</button>`).join("")}</div></div>
+    <div class="stack-sm"><span class="lbl">Secondary events (up to 2)</span><div class="chips">${SEC_EVENTS.filter(e=>e.k!==o.event).map(e=>{const on=secs.includes(e.k);return `<button type="button" class="chip-btn sm" data-${pre}-sec="${e.k}" aria-pressed="${on}" ${!on&&secs.length>=2?"disabled":""}>${lab(e.k)}</button>`;}).join("")}</div>
+    <p class="small muted">Secondary events add some of their own sessions every other week and count in your records and insights.</p></div>`;
+}
+function toggleSec(o,k){o.secondaries=o.secondaries||[];const i=o.secondaries.indexOf(k);if(i>=0)o.secondaries.splice(i,1);else if(o.secondaries.length<2)o.secondaries.push(k);}
+function dobField(id,val){const max=todayISO();return `<label for="${id}">Date of birth<input id="${id}" type="date" max="${max}" value="${val||""}"></label>`;}
 function goalPicker(type,champ,indoor,pre){
   const opts=[["continual","Keep getting faster","No single peak. Steady progress while racing through the season, with a mini-taper before each race."],
     ["peak","Peak for a championship","Builds to one date, with a taper in the last two weeks."],
@@ -688,18 +858,21 @@ function daysEditor(days,pre){
     <div class="seg" role="group" aria-label="${DAY_LONG[i]}">${DAY_OPTS.map(o=>`<button type="button" data-day-i="${i}" data-day-v="${o.k}" data-pre="${pre}" aria-pressed="${days[i]===o.k}">${o.n}</button>`).join("")}</div></div>`).join("")}</div>
     <p class="small muted">${days.filter(x=>x==="track"||x==="both").length} track days, ${days.filter(x=>x==="gym"||x==="both").length} gym days.</p>`;
 }
-function readSetup(){const d=ui.setup;if(!d)return;const n=$("#su-name");if(n)d.name=n.value;const st=$("#su-start");if(st&&st.value)d.blockStart=st.value;
+function newSetup(first){return{name:"",sex:"M",dob:"",event:"",secondaries:[],goal:"continual",champ:"",indoor:"",blockStart:iso(mondayOf(new Date())),days:["both","track","gym","track","both","track","rest"],first};}
+function readSetup(){const d=ui.setup;if(!d)return;const n=$("#su-name");if(n)d.name=n.value;const db=$("#su-dob");if(db)d.dob=db.value;const st=$("#su-start");if(st&&st.value)d.blockStart=st.value;
   const g=$$("input[name='su-goal']").find(x=>x.checked);if(g)d.goal=g.value;const c=$("#su-champ");if(c)d.champ=c.value;const ind=$("#su-indoor");if(ind)d.indoor=ind.value;}
 function bindSetup(){
   const d=ui.setup;
   $$("[data-sx]").forEach(b=>b.onclick=()=>{readSetup();d.sex=b.dataset.sx;render();});
-  $$("[data-ev]").forEach(b=>b.onclick=()=>{readSetup();d.event=b.dataset.ev;render();});
+  $$("[data-su-ev]").forEach(b=>b.onclick=()=>{readSetup();d.event=b.dataset.suEv;d.secondaries=d.secondaries.filter(k=>k!==d.event);render();});
+  $$("[data-su-sec]").forEach(b=>b.onclick=()=>{readSetup();toggleSec(d,b.dataset.suSec);render();});
+  $("#su-dob").onchange=()=>{readSetup();render();};
   $$("input[name='su-goal']").forEach(r=>r.onchange=()=>{readSetup();render();});
   $$("[data-day-i][data-pre='su']").forEach(b=>b.onclick=()=>{readSetup();d.days[+b.dataset.dayI]=b.dataset.dayV;render();});
   $("#su-go").onclick=()=>{readSetup();
     if(d.goal!=="continual"&&!d.champ){toast("Add your championship date, or pick “Keep getting faster”.");return;}
     if(d.goal==="double"&&!d.indoor){toast("Add your indoor championship date.");return;}
-    const b=blankProfile();Object.assign(b.profile,{name:d.name.trim(),sex:d.sex,event:d.event,days:[...d.days],blockStart:iso(mondayOf(parseISO(d.blockStart))),goal:{type:d.goal,champ:d.champ,indoor:d.indoor}});
+    const b=blankProfile();Object.assign(b.profile,{name:d.name.trim(),sex:d.sex,dob:d.dob,event:d.event,secondaries:[...d.secondaries],days:[...d.days],blockStart:iso(mondayOf(parseISO(d.blockStart))),goal:{type:d.goal,champ:d.champ,indoor:d.indoor}});
     S=b;ui.setup=null;ui.tab="records";ui.weekOffset=0;commit("Plan built. Add your PBs to tailor it.");};
   const cancel=$("#su-cancel");if(cancel)cancel.onclick=()=>{ui.setup=null;if(!S&&INDEX.active)S=loadProfile(INDEX.active);render();};
   const imp=$("#su-import");if(imp)imp.onchange=e=>importBackup(e.target.files[0]);
@@ -896,7 +1069,7 @@ function profilesSheet(){return `<div class="spread"><h2 id="sh-title">Athletes<
   <div class="stack-sm">${INDEX.profiles.map(pr=>`<button class="spread" data-switch="${pr.id}" ${pr.id===S.id?'aria-current="true"':""} style="justify-content:space-between;text-align:left"><span>${esc(pr.name||"Athlete")}</span><span class="small muted">${pr.id===S.id?"Current":"Switch"}</span></button>`).join("")}</div>
   <button class="primary" id="pf-add">Add an athlete</button>`;}
 function bindProfilesSheet(){$$("[data-switch]").forEach(b=>b.onclick=()=>{if(b.dataset.switch!==S.id)switchProfile(b.dataset.switch);else closeSheet();});
-  $("#pf-add").onclick=()=>{ui.sheet=null;ui.setup=null;ui.setup={name:"",sex:"M",event:"",goal:"continual",champ:"",indoor:"",blockStart:iso(mondayOf(new Date())),days:["both","track","gym","track","both","track","rest"],first:false};render();};}
+  $("#pf-add").onclick=()=>{ui.sheet=null;ui.setup=newSetup(false);render();};}
 
 /* ---------- races ---------- */
 function racesView(){
@@ -925,25 +1098,27 @@ function bindRaces(){
 /* ---------- records ---------- */
 function recordsView(){
   const main=mainName(S.profile);
-  const evs=EVENTS.filter(e=>!e.endsWith("H")||isHurdler(S.profile)||S.records.some(r=>r.event===e));
-  const cards=evs.map(e=>{const {pb,sb}=bests(e);return `<div class="rec ${e===main?"main":""}"><div class="ev">${e}</div>
-    <div class="lbl">PB</div><div class="t">${pb?fmtTime(pb.secs)+(pb.timing==="HT"?"h":""):"—"}</div>
-    <div class="lbl" style="margin-top:6px">Season's best</div><div class="muted" style="font-weight:600">${sb?fmtTime(sb.secs)+(sb.timing==="HT"?"h":""):"—"}</div></div>`;}).join("");
+  const mine=new Set(allEvents(S.profile).map(k=>evName(S.profile,k)));
+  const evs=EVENTS.filter(e=>!e.endsWith("H")||mine.has(e)||(e==="60mH"&&S.profile.event==="SH")||S.records.some(r=>r.event===e));
+  const cards=evs.map(e=>{const b=bests(e);const {pb,sb}=b;return `<div class="rec ${mine.has(e)?"main":""}"><div class="ev">${e}</div>
+    <div class="lbl">PB</div><div class="t">${pb?fmtMark(pb):"—"}</div>
+    ${b.pbHand?`<div class="small muted">Hand: ${fmtMark(b.pbHand)}</div>`:""}
+    <div class="lbl" style="margin-top:6px">Season's best</div><div class="muted" style="font-weight:600">${sb?fmtMark(sb):"—"}${b.sbHand?` <span class="small">· ${fmtMark(b.sbHand)}</span>`:""}</div></div>`;}).join("");
   const sorted=[...S.records].sort((a,b)=>b.date.localeCompare(a.date));
-  const pbIds=new Set(EVENTS.map(e=>bests(e).pb?.id).filter(Boolean));
+  const pbIds=new Set(EVENTS.flatMap(e=>{const b=bests(e);return[b.pb?.id,b.pbHand?.id];}).filter(Boolean));
   const pf=ui.prefill||{};
   const table=sorted.length?`<div class="tbl"><table class="marks"><thead><tr><th>Event</th><th>Time</th><th>Wind</th><th>Date</th><th>Where</th><th></th></tr></thead><tbody>
-    ${sorted.map(r=>`<tr><td>${r.event}</td><td><strong>${fmtTime(r.secs)}${r.timing==="HT"?"h":""}${r.indoor?"i":""}</strong> ${pbIds.has(r.id)?'<span class="tag pb">PB</span>':""}${!windLegal(r)?' <span class="tag">w</span>':""}</td>
+    ${sorted.map(r=>`<tr><td>${r.event}</td><td><strong>${fmtMark(r)}${r.indoor?"i":""}</strong> ${pbIds.has(r.id)?'<span class="tag pb">PB</span>':""}${!windLegal(r)?' <span class="tag">w</span>':""}</td>
       <td>${r.wind!==""&&r.wind!=null?(Number(r.wind)>0?"+":"")+Number(r.wind).toFixed(1):"—"}</td><td>${fmtDate(r.date)}</td><td>${esc(r.venue||"")}</td>
       <td><button class="link" data-del="${r.id}" aria-label="Delete ${r.event} ${fmtTime(r.secs)}">Delete</button></td></tr>`).join("")}</tbody></table></div>`
     :`<p class="muted">No results yet. Add your best times, even old ones, with the date you ran them.</p>`;
   const rows=ui.importRows;
   const preview=rows?(rows.length?`<div class="tbl"><table class="marks"><thead><tr><th></th><th>Event</th><th>Time</th><th>Wind</th><th>Date</th><th>Where</th></tr></thead><tbody>
-      ${rows.map((r,i)=>`<tr><td><input type="checkbox" id="imp-${i}" data-imp="${i}" ${r.pick?"checked":""} aria-label="Import ${r.event} ${fmtTime(r.secs)}"></td><td>${r.event}</td><td>${fmtTime(r.secs)}${r.timing==="HT"?"h":""}${r.indoor?"i":""}${r.dup?' <span class="tag">already saved</span>':""}</td><td>${r.wind!==""?(r.wind>0?"+":"")+Number(r.wind).toFixed(1):"—"}</td><td>${fmtDate(r.date)}</td><td>${esc(r.venue)}</td></tr>`).join("")}</tbody></table></div>
+      ${rows.map((r,i)=>`<tr><td><input type="checkbox" id="imp-${i}" data-imp="${i}" ${r.pick?"checked":""} aria-label="Import ${r.event} ${fmtTime(r.secs)}"></td><td>${r.event}</td><td>${fmtMark(r)}${r.indoor?"i":""}${r.dup?' <span class="tag">already saved</span>':""}</td><td>${r.wind!==""?(r.wind>0?"+":"")+Number(r.wind).toFixed(1):"—"}</td><td>${fmtDate(r.date)}</td><td>${esc(r.venue)}</td></tr>`).join("")}</tbody></table></div>
       <div class="row"><button class="primary" id="imp-go">Import ${rows.filter(r=>r.pick).length} result${rows.filter(r=>r.pick).length===1?"":"s"}</button><button class="ghost" id="imp-cancel">Cancel</button></div>`
     :`<p class="why">No results found in that text. Copy the rows from your performances list, including the event, time and date.</p>`):"";
   return `<div class="stack-lg"><div class="stack-sm"><div class="eyebrow">Records</div><h1>PBs and season's bests</h1>
-    <p class="muted">Season's bests count from ${fmtDate(S.profile.seasonStart)}. Wind over +2.0 doesn't count. Hand times show “h”.</p></div>
+    <p class="muted">Season's bests count from ${fmtDate(S.profile.seasonStart)}. Wind over +2.0 doesn't count. Hand times show “h” and are kept separate from electronic times, like on Power of 10.</p></div>
     <div class="rec-grid">${cards}</div>
     <div class="panel stack"><h3>Add a result</h3>
       <div class="grid3">
@@ -956,8 +1131,9 @@ function recordsView(){
       </div>
       <div><button class="primary" id="r-add">Add result</button></div></div>
     <div class="panel stack"><h3>Paste from Power of 10</h3>
-      <p class="small muted">On Power of 10, open your profile, select your performance rows, copy, and paste them here. You'll see what was found before anything is saved.</p>
-      <label for="imp-text">Pasted results<textarea id="imp-text" placeholder="200  22.45  +1.2  2  Lee Valley  County Champs  12 Jul 25"></textarea></label>
+      <p class="small muted">On Power of 10, open your profile, copy one year's results, pick that year below and paste. You'll see what was found before anything is saved. Wind-assisted results are kept but don't count as PBs.</p>
+      <label for="imp-year" style="max-width:220px">Year these results are from<select id="imp-year">${(()=>{const y=new Date().getFullYear();return [...Array(30)].map((_,i)=>`<option ${ui.importYear==y-i?"selected":""}>${y-i}</option>`).join("");})()}</select></label>
+      <label for="imp-text">Pasted results<textarea id="imp-text" placeholder="Paste one year at a time, straight from your Power of 10 profile">${esc(ui.importText||"")}</textarea></label>
       <div class="row"><button id="imp-read">Read results</button></div>${preview}</div>
     <div class="stack"><h3>All results</h3>${table}</div></div>`;
 }
@@ -967,10 +1143,10 @@ function bindRecords(){
     S.records.push({id:newId(),event:ev,secs,date:$("#r-date").value||todayISO(),timing:$("#r-timing").value,wind:w===""?"":Number(w),venue:$("#r-venue").value.trim()});
     ui.prefill=null;commit(`${ev} ${fmtTime(secs)} added.`);};
   $$("[data-del]").forEach(b=>b.onclick=()=>{if(b.dataset.confirm){S.records=S.records.filter(r=>r.id!==b.dataset.del);commit("Result deleted.");}else{b.dataset.confirm="1";b.textContent="Tap to confirm";}});
-  $("#imp-read").onclick=()=>{ui.importRows=parsePo10($("#imp-text").value);render();};
+  $("#imp-read").onclick=()=>{ui.importYear=+$("#imp-year").value;ui.importText=$("#imp-text").value;ui.importRows=parsePo10(ui.importText,ui.importYear);render();};
   $$("[data-imp]").forEach(c=>c.onchange=()=>{ui.importRows[+c.dataset.imp].pick=c.checked;const n=ui.importRows.filter(r=>r.pick).length;$("#imp-go").textContent=`Import ${n} result${n===1?"":"s"}`;});
   const go=$("#imp-go");if(go)go.onclick=()=>{const pick=ui.importRows.filter(r=>r.pick);
-    pick.forEach(r=>S.records.push({id:newId(),event:r.event,secs:r.secs,date:r.date,timing:r.timing,wind:r.wind,venue:r.venue,indoor:r.indoor}));ui.importRows=null;commit(`Imported ${pick.length} result${pick.length===1?"":"s"}.`);};
+    pick.forEach(r=>S.records.push({id:newId(),event:r.event,secs:r.secs,date:r.date,timing:r.timing,wind:r.wind,venue:r.venue,indoor:r.indoor}));ui.importRows=null;ui.importText="";commit(`Imported ${pick.length} result${pick.length===1?"":"s"}.`);};
   const ca=$("#imp-cancel");if(ca)ca.onclick=()=>{ui.importRows=null;render();};
 }
 
@@ -1007,7 +1183,11 @@ function insightsView(){
   const dists=distances();if(!ui.chartDist||!dists.includes(ui.chartDist))ui.chartDist=dists[0]||null;
   const raceList=S.records.filter(r=>r.event===mainName(p)&&windLegal(r)).map(r=>({date:r.date,t:fatEq(r)})).sort((x,y)=>x.date.localeCompare(y.date));
   return `<div class="stack-lg"><div class="stack-sm"><div class="eyebrow">Insights</div><h1>What you need to work on</h1>
-    <p class="muted">Built from your PBs, your event (${esc(mainName(p))}) and where you are in the season. Hand times are converted to electronic before comparing.</p></div>
+    <p class="muted">Built from your PBs, your events (${esc(eventLabel(p))}) and where you are in the season. Hand times are converted to electronic before comparing.</p></div>
+    ${(p.priorities||[]).length?`<div class="panel finding"><div class="bar" style="--c:var(--accent)"></div><div class="stack-sm"><span class="eyebrow">Coach priorities</span><h3>${p.priorities.map(k=>esc(TYPES[k].name)).join(" and ")}</h3><p>Guaranteed in your plan ${S.profile.days.filter(x=>x==="track"||x==="both").length>=4?"every week":"every other week"}, whatever the comparisons below say.</p></div></div>`:""}
+    ${(()=>{const wb=baseWeek(mondayOf(new Date()));const d=wb.dose;const lv=athleteLevel();const names={develop:"Develop",maintain:"Maintain",sharpen:"Sharpen",none:"Rest"};
+      return `<div class="panel finding"><div class="bar" style="--c:var(--t-maxv)"></div><div class="stack-sm"><span class="eyebrow">Speed this week</span><h3>${names[d.dose]}</h3><p>${esc(d.why)}</p>${lv&&lv.level!=="youth"?`<p class="small muted">Level: ${lv.level}, from your ${esc(lv.ev)} of ${fmtTime(lv.t)}${lv.graded?" (age-graded, approximate)":""}.</p>`:""}</div></div>`;})()}
+    ${a.adjusted.length?`<div class="panel"><p class="small muted"><strong>Wind-adjusted marks in use:</strong> ${esc(a.adjusted.join("; "))}. Used only where you have no legal mark or this is clearly faster. Winds over +4.0 are ignored.</p></div>`:""}
     ${a.findings.map(f=>`<div class="panel finding"><div class="bar" style="--c:${f.c}"></div><div class="stack-sm"><h3>${esc(f.title)}</h3><div class="ratio">${esc(f.ratio)}</div><p>${esc(f.text)}</p></div></div>`).join("")}
     ${a.missing.length?`<div class="panel"><p class="muted">Add PBs for ${esc(a.missing.join("; "))} to unlock ${a.findings.length?"more":"these"} comparisons.</p></div>`:""}
     <div class="panel stack"><div class="spread"><h3>Quality work emphasis</h3><span class="small muted">${PHASES[ph.p].name}</span></div>
@@ -1028,11 +1208,21 @@ function settingsView(){
   return `<div class="stack-lg"><div class="stack-sm"><div class="eyebrow">Settings</div><h1>Athlete and season</h1></div>
     <div class="panel stack"><h3>Athlete</h3>
       <div class="grid2"><label for="s-name">Name<input id="s-name" value="${esc(p.name)}"></label>
-      <div class="stack-sm"><span class="lbl">Sex (for hurdle heights)</span><div class="chips">${[["M","Male"],["F","Female"]].map(([k,n])=>`<button type="button" class="chip-btn sm" data-ssx="${k}" aria-pressed="${p.sex===k}">${n}</button>`).join("")}</div></div></div>
-      <div class="stack-sm"><span class="lbl">Main event</span><div class="chips">${MAIN_EVENTS.map(e=>`<button type="button" class="chip-btn" data-sev="${e.k}" aria-pressed="${p.event===e.k}">${e.k==="SH"?(p.sex==="F"?"100mH":"110mH"):e.n}</button>`).join("")}</div></div>
-      ${isHurdler(p)?`<div class="grid2"><label for="s-age">Hurdle heights<select id="s-age"><option value="senior" ${p.ageGroup==="senior"?"selected":""}>Senior</option><option value="u20" ${p.ageGroup==="u20"?"selected":""}>Under 20</option><option value="custom" ${p.ageGroup==="custom"?"selected":""}>Custom</option></select></label>
-        ${p.ageGroup==="custom"?`<label for="s-hh">Hurdle height (m)<input id="s-hh" inputmode="decimal" value="${esc(p.hurdleH)}" placeholder="e.g. 0.914"></label>`:`<p class="small muted" style="align-self:end">${(()=>{const h=hurdleSpec(p);return `${h.h.toFixed(3)}m, ${h.first}m to the first hurdle, ${h.sp}m apart.`;})()}</p>`}</div>`:""}
+      <div class="stack-sm"><span class="lbl">Sex</span><div class="chips">${[["M","Male"],["F","Female"]].map(([k,n])=>`<button type="button" class="chip-btn sm" data-ssx="${k}" aria-pressed="${p.sex===k}">${n}</button>`).join("")}</div></div>
+      ${dobField("s-dob",p.dob)}<p class="small muted" style="align-self:end">${agLabel(p)?`Age group: <strong>${esc(agLabel(p))}</strong> (UK Athletics). It updates automatically each season.`:"Add a date of birth to set your UK Athletics age group."}</p></div>
+      ${eventPickers(p,"s")}
+      ${isHurdler(p)?(()=>{const hs=hurdleSpec(p);const ev=hurdleEv(p);const races=ev==="SH"?SH_RACES:LH_RACES;const cur=hurdleRace(p,ev);
+        return `<hr><div class="stack-sm"><span class="lbl">Hurdles</span>
+        <div class="grid2"><label for="s-hrace">Your ${ev==="SH"?"sprint hurdles":"long hurdles"} race<select id="s-hrace">${races.map(r=>`<option ${r===cur?"selected":""}>${r}</option>`).join("")}</select></label>
+        <p class="small muted" style="align-self:end">${hs&&!hs.custom?`Standard specs: ${hs.h.toFixed(3)}m, ${hs.first}m to H1, ${hs.sp}m apart.`:hs&&hs.custom?"Using your own specs below.":"Enter your race's specs below. Youth and masters heights and spacings vary, so check the current UK Athletics rules."}</p></div>
+        <div class="grid3"><label for="s-hh">Height (m)<input id="s-hh" inputmode="decimal" value="${esc(p.hSpec.h)}" placeholder="${hs&&!hs.custom?hs.h.toFixed(3):"e.g. 0.840"}"></label>
+        <label for="s-hf">To first hurdle (m)<input id="s-hf" inputmode="decimal" value="${esc(p.hSpec.first)}" placeholder="${hs&&!hs.custom&&hs.first?hs.first:"e.g. 12"}"></label>
+        <label for="s-hs">Spacing (m)<input id="s-hs" inputmode="decimal" value="${esc(p.hSpec.sp)}" placeholder="${hs&&!hs.custom&&hs.sp?hs.sp:"e.g. 8"}"></label></div>
+        <p class="small muted">Leave these blank to use the standard senior or under-20 specs.</p></div>`;})():""}
     </div>
+    <div class="panel stack"><h3>Coach's priorities</h3>
+      <p class="small muted">Pick up to two qualities your plan must not neglect. They're guaranteed a session every week with 4 or more track days, otherwise every other week, and they come first in Insights.</p>
+      <div class="chips">${ORDER.filter(QUAL_OK).map(k=>{const on=(p.priorities||[]).includes(k);return `<button type="button" class="chip-btn sm" data-prio="${k}" aria-pressed="${on}" ${!on&&(p.priorities||[]).length>=2?"disabled":""}>${TYPES[k].name}</button>`;}).join("")}</div></div>
     <div class="panel stack"><h3>Goal</h3>${goalPicker(p.goal.type,p.goal.champ,p.goal.indoor,"s")}</div>
     <div class="panel stack"><h3>Who writes the plan</h3>
       ${[["app","Sprint Coach","The app writes every session from your event, goal and PBs."],["coach","My coach","You enter your coach's sessions. The app is your log and tracker."],["hybrid","Hybrid","The app plans every day. When you enter or log a session from your coach, it takes priority and the app rebalances the rest of the week."]].map(([k,n,t])=>`<label class="check" for="s-m-${k}" style="align-items:flex-start"><input type="radio" name="s-mode" id="s-m-${k}" value="${k}" ${p.mode===k?"checked":""}><span><strong>${n}</strong><br><span class="small muted">${t}</span></span></label>`).join("")}
@@ -1052,16 +1242,19 @@ function settingsView(){
     <div class="panel stack"><h3>Backup</h3><p class="small muted">Everything is stored on this device. Export a backup now and then, especially before changing devices.</p>
       <div class="row"><button id="b-export">Export backup</button></div>
       <label for="b-import" class="small">Restore a backup (replaces this athlete's data)<input id="b-import" type="file" accept="application/json,.json"></label>
-      <p class="sync">Sprint Coach version ${DATA_VERSION}. Works offline once opened.</p></div>
+      <p class="sync">Sprint Coach version 2.1. Works offline once opened.</p></div>
     <div class="panel stack"><h3>Athletes</h3><div class="row"><button id="s-switch">Switch or add athlete</button>${INDEX.profiles.length>1?`<button class="ghost danger" id="s-delprof">Delete ${esc(p.name||"this athlete")}</button>`:""}</div></div></div>`;
 }
 function bindSettings(){
   const p=S.profile;
   $("#s-name").onchange=e=>{p.name=e.target.value.trim();commit();};
   $$("[data-ssx]").forEach(b=>b.onclick=()=>{p.sex=b.dataset.ssx;commit();});
-  $$("[data-sev]").forEach(b=>b.onclick=()=>{p.event=b.dataset.sev;commit(`Plan switched to ${mainName(p)}.`);});
-  const age=$("#s-age");if(age)age.onchange=()=>{p.ageGroup=age.value;commit();};
-  const hh=$("#s-hh");if(hh)hh.onchange=()=>{p.hurdleH=hh.value.trim();commit();};
+  $$("[data-s-ev]").forEach(b=>b.onclick=()=>{p.event=b.dataset.sEv;p.secondaries=(p.secondaries||[]).filter(k=>k!==p.event);if(!QUAL_OK("hStart"))p.priorities=(p.priorities||[]).filter(QUAL_OK);commit(`Plan switched to ${mainName(p)}.`);});
+  $$("[data-s-sec]").forEach(b=>b.onclick=()=>{toggleSec(p,b.dataset.sSec);p.priorities=(p.priorities||[]).filter(QUAL_OK);commit("Events updated.");});
+  $$("[data-prio]").forEach(b=>b.onclick=()=>{const k=b.dataset.prio;p.priorities=p.priorities||[];const i=p.priorities.indexOf(k);if(i>=0)p.priorities.splice(i,1);else if(p.priorities.length<2)p.priorities.push(k);commit("Priorities updated. The plan has been adjusted.");});
+  $("#s-dob").onchange=e=>{p.dob=e.target.value;commit(agLabel(p)?`Age group: ${agLabel(p)}.`:"");};
+  const hr=$("#s-hrace");if(hr)hr.onchange=()=>{if(hurdleEv(p)==="SH")p.hRace=hr.value;else p.hRaceLong=hr.value;commit();};
+  [["#s-hh","h"],["#s-hf","first"],["#s-hs","sp"]].forEach(([id,k])=>{const el=$(id);if(el)el.onchange=()=>{p.hSpec[k]=el.value.trim();commit("Hurdle specs saved.");};});
   $$("input[name='s-goal']").forEach(r=>r.onchange=()=>{p.goal.type=r.value;commit("Goal updated.");});
   const gc=$("#s-champ");if(gc)gc.onchange=()=>{p.goal.champ=gc.value;commit("Season rebuilt around the new date.");};
   const gi=$("#s-indoor");if(gi)gi.onchange=()=>{p.goal.indoor=gi.value;commit("Season rebuilt around the new date.");};
